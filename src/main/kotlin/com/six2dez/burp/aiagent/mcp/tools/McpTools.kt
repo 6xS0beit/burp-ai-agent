@@ -32,6 +32,7 @@ import io.modelcontextprotocol.kotlin.sdk.Tool
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -1776,6 +1777,7 @@ object McpToolExecutor {
     }
 
     private fun normalizeArgs(toolName: String, rawArgs: String?): String? {
+        val coerced = coerceStringifiedCollections(rawArgs)
         val lowered = toolName.lowercase()
         val needsPaging = lowered in setOf(
             "proxy_http_history",
@@ -1787,9 +1789,9 @@ object McpToolExecutor {
             "site_map_regex",
             "scanner_issues"
         )
-        if (!needsPaging) return rawArgs
+        if (!needsPaging) return coerced
 
-        val obj = parseArgsObject(rawArgs)
+        val obj = parseArgsObject(coerced)
         val count = obj["count"] ?: obj["limit"] ?: JsonPrimitive(5)
         val offset = obj["offset"] ?: JsonPrimitive(0)
         val merged = obj.toMutableMap().apply {
@@ -1798,6 +1800,48 @@ object McpToolExecutor {
             remove("limit")
         }
         return JsonObject(merged).toString()
+    }
+
+    /**
+     * n8n (and some other AI agent frameworks) stringify JSON arrays/objects before
+     * forwarding them to MCP tools, e.g. seedUrls becomes the string
+     * "[\"https://target.com\"]" instead of a real JsonArray.
+     * This function walks every top-level value in the args object and, when a value
+     * is a JsonPrimitive string whose trimmed content starts with '[' or '{', it
+     * attempts to re-parse it back into the proper JsonArray / JsonObject.
+     * Values that fail to re-parse are left unchanged so no data is lost.
+     */
+    private fun coerceStringifiedCollections(rawArgs: String?): String? {
+        val text = rawArgs?.trim() ?: return rawArgs
+        if (text.isBlank()) return rawArgs
+        val parsed = try {
+            decodeJson.parseToJsonElement(text)
+        } catch (_: Exception) {
+            return rawArgs
+        }
+        val obj = parsed as? JsonObject ?: return rawArgs
+        val anyNeedsCoercion = obj.values.any { value ->
+            value is JsonPrimitive && value.isString &&
+                value.content.trimStart().let { it.startsWith("[") || it.startsWith("{") }
+        }
+        if (!anyNeedsCoercion) return rawArgs
+        val coerced = obj.mapValues { (_, value) ->
+            if (value is JsonPrimitive && value.isString) {
+                val inner = value.content.trimStart()
+                if (inner.startsWith("[") || inner.startsWith("{")) {
+                    try {
+                        decodeJson.parseToJsonElement(value.content)
+                    } catch (_: Exception) {
+                        value
+                    }
+                } else {
+                    value
+                }
+            } else {
+                value
+            }
+        }
+        return JsonObject(coerced).toString()
     }
 
     private fun parseArgsObject(rawArgs: String?): Map<String, JsonElement> {
