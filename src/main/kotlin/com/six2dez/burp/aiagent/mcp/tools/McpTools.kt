@@ -1501,7 +1501,16 @@ object McpToolExecutor {
                         burp.api.montoya.scanner.CrawlConfiguration.crawlConfiguration(*input.seedUrls.toTypedArray())
                     )
                     val id = ScannerTaskRegistry.put(crawl)
-                    "Started crawl: id=$id status=${crawl.statusMessage()}"
+                    val rawStatus = crawl.statusMessage()
+                    // Burp's CrawlTask.statusMessage() returns "Not yet implemented" on some
+                    // versions of the Montoya API.  That string is meaningless to the caller and
+                    // causes AI agents to misinterpret a successful launch as a failure.  We
+                    // replace it with a neutral "running" indicator so the response is unambiguous.
+                    val displayStatus = if (
+                        rawStatus.isNullOrBlank() ||
+                        rawStatus.equals("not yet implemented", ignoreCase = true)
+                    ) "running" else rawStatus
+                    "Crawl started successfully. id=$id seedUrls=${input.seedUrls} status=$displayStatus"
                 }
                 "scan_task_status" -> {
                     ensurePro(context, resolvedName)
