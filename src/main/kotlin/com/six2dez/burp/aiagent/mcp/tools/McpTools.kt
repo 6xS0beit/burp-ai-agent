@@ -1455,7 +1455,7 @@ object McpToolExecutor {
                     )
                     val audit = api.scanner().startAudit(cfg)
                     val id = ScannerTaskRegistry.put(audit)
-                    "Started audit: id=$id status=${audit.statusMessage()}"
+                    "Started audit: id=$id status=${safeStatus(audit::statusMessage)}"
                 }
                 "scan_audit_start_mode" -> {
                     ensurePro(context, resolvedName)
@@ -1473,9 +1473,9 @@ object McpToolExecutor {
                     }
                     val id = ScannerTaskRegistry.put(audit)
                     if (input.requests.isEmpty()) {
-                        "Started audit: id=$id status=${audit.statusMessage()}"
+                        "Started audit: id=$id status=${safeStatus(audit::statusMessage)}"
                     } else {
-                        "Started audit with requests: id=$id status=${audit.statusMessage()}"
+                        "Started audit with requests: id=$id status=${safeStatus(audit::statusMessage)}"
                     }
                 }
                 "scan_audit_start_requests" -> {
@@ -1492,7 +1492,7 @@ object McpToolExecutor {
                         audit.addRequest(req)
                     }
                     val id = ScannerTaskRegistry.put(audit)
-                    "Started audit with requests: id=$id status=${audit.statusMessage()}"
+                    "Started audit with requests: id=$id status=${safeStatus(audit::statusMessage)}"
                 }
                 "scan_crawl_start" -> {
                     ensurePro(context, resolvedName)
@@ -1501,22 +1501,16 @@ object McpToolExecutor {
                         burp.api.montoya.scanner.CrawlConfiguration.crawlConfiguration(*input.seedUrls.toTypedArray())
                     )
                     val id = ScannerTaskRegistry.put(crawl)
-                    val rawStatus = crawl.statusMessage()
-                    // Burp's CrawlTask.statusMessage() returns "Not yet implemented" on some
-                    // versions of the Montoya API.  That string is meaningless to the caller and
-                    // causes AI agents to misinterpret a successful launch as a failure.  We
-                    // replace it with a neutral "running" indicator so the response is unambiguous.
-                    val displayStatus = if (
-                        rawStatus.isNullOrBlank() ||
-                        rawStatus.equals("not yet implemented", ignoreCase = true)
-                    ) "running" else rawStatus
-                    "Crawl started successfully. id=$id seedUrls=${input.seedUrls} status=$displayStatus"
+                    "Crawl started successfully. id=$id seedUrls=${input.seedUrls} status=${safeStatus(crawl::statusMessage)}"
                 }
                 "scan_task_status" -> {
                     ensurePro(context, resolvedName)
                     val input = decode<GetScanTaskStatus>(normalizedArgs)
                     val task = ScannerTaskRegistry.get(input.taskId) ?: return@runTool "Task not found: ${input.taskId}"
-                    val base = "status=${task.statusMessage()} requests=${task.requestCount()} errors=${task.errorCount()}"
+                    val status = safeStatus(task::statusMessage)
+                    val requests = safeInt(task::requestCount)
+                    val errors = safeInt(task::errorCount)
+                    val base = "status=$status requests=$requests errors=$errors"
                     val audit = task as? Audit
                     if (audit != null) {
                         val count = audit.issues().size
@@ -1820,6 +1814,36 @@ object McpToolExecutor {
      * attempts to re-parse it back into the proper JsonArray / JsonObject.
      * Values that fail to re-parse are left unchanged so no data is lost.
      */
+    /**
+     * Calls the Montoya API statusMessage() supplier and sanitises the result.
+     * Some versions of the Montoya API throw UnsupportedOperationException or return
+     * the literal string "Not yet implemented" from CrawlTask/Audit task methods.
+     * Both cases are mapped to "running" so AI agents receive an unambiguous success signal.
+     */
+    private fun safeStatus(supplier: () -> String?): String {
+        return try {
+            val raw = supplier()
+            if (raw.isNullOrBlank() || raw.equals("not yet implemented", ignoreCase = true)) "running"
+            else raw
+        } catch (_: UnsupportedOperationException) {
+            "running"
+        } catch (_: Exception) {
+            "unknown"
+        }
+    }
+
+    /**
+     * Safely calls an Int-returning Montoya API method that may throw
+     * UnsupportedOperationException on some API versions.
+     */
+    private fun safeInt(supplier: () -> Int): Int {
+        return try {
+            supplier()
+        } catch (_: Exception) {
+            0
+        }
+    }
+
     private fun coerceStringifiedCollections(rawArgs: String?): String? {
         val text = rawArgs?.trim() ?: return rawArgs
         if (text.isBlank()) return rawArgs
